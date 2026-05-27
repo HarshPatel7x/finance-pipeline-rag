@@ -2,6 +2,8 @@
 
 Compiled at the close of Step 1. ~45 min from `mkdir` to first push.
 
+> **Conceptual references for any term you see here** (RAG, corpus, embedding, LangChain, BM25, etc.) live in [`glossary.md`](./glossary.md) — read top-down for the full pipeline picture, or jump to any section.
+
 ---
 
 ## What we built
