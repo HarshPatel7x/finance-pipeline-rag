@@ -1,0 +1,31 @@
+# finance-pipeline-rag dependencies — loose pins (>=X.Y, no upper cap on minor)
+# Pin tighter (==X.Y.Z) once eval metrics land and reproducibility matters.
+
+# --- Pipeline orchestration + Claude generation ---
+langchain>=0.3,<0.4
+langchain-anthropic>=0.2
+
+# --- Vector store: Chroma persistent local DB ---
+chromadb>=0.5
+langchain-chroma>=0.1
+
+# --- Embedding + reranking: Voyage AI (voyage-3-large + rerank-2 per DECISIONS) ---
+voyageai>=0.2
+langchain-voyageai>=0.1
+
+# --- Text chunking: 512-token chunks per DECISIONS row 5 ---
+langchain-text-splitters>=0.3
+
+# --- Hybrid retrieval: BM25 keyword side ---
+rank-bm25>=0.2
+
+# --- Eval harness: DeepEval RAG-triad + Ollama local judge (free, replaces paid LLM judge) ---
+deepeval>=2.0
+ollama>=0.4
+
+# --- Data loading + env management ---
+pandas>=2.2
+python-dotenv>=1.0
+
+# --- Testing ---
+pytest>=8.0
