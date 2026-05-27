@@ -87,8 +87,10 @@ cp .env.example .env
 ollama pull llama3.1:8b
 ollama serve  # leave running in a separate terminal
 
-# 4. Build the vector index from your DynamoDB CSV export
-python scripts/build_index.py --corpus data/transactions.csv
+# 4. Generate the synthetic corpus + build the vector index
+python scripts/generate_corpus.py   # 693 transactions → data/transactions.json
+python scripts/build_corpus.py      # → data/corpus.json (chunked with Contextual prefix)
+python scripts/build_index.py       # → chroma_db/ (Voyage embeddings, persisted)
 
 # 5. Ask a question
 python scripts/ask.py "How much did I spend on dining in Q1?"
