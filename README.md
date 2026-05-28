@@ -4,7 +4,7 @@
 
 > **Corpus note:** the project ships with a **synthetic corpus** of ~500-1000 transactions, deterministically generated to exercise retrieval quality across 15-20 categories and 12 months. This is honest about scope — the predecessor [`finance-pipeline`](https://github.com/HarshPatel7x/finance-pipeline) ingests Plaid-sandbox data; real BofA `development`-mode OAuth was a known unresolved blocker. The retrieval + eval logic is corpus-agnostic — swap in real DynamoDB output once available without changing the pipeline.
 
-> **Status:** WIP — Step 1 (repo skeleton) shipped 2026-05-27. Build steps tracked in [`plans/WORKITEMS.md` §#1](../plans/WORKITEMS.md). Hard ship date: **2026-06-02**.
+> **Status:** WIP — Steps 1-4 shipped 2026-05-27→2026-05-28 (skeleton + synthetic corpus + Chroma index + hybrid retrieval). Build steps tracked in [`plans/WORKITEMS.md` §#1](../plans/WORKITEMS.md). Hard ship date: **2026-06-02**.
 
 ---
 
@@ -92,10 +92,13 @@ python scripts/generate_corpus.py   # 693 transactions → data/transactions.jso
 python scripts/build_corpus.py      # → data/corpus.json (chunked with Contextual prefix)
 python scripts/build_index.py       # → chroma_db/ (Voyage embeddings, persisted)
 
-# 5. Ask a question
+# 5. (Optional) Verify hybrid retrieval — prints top-5 chunks for a sample query
+python scripts/retrieve.py "Vietnamese food in summer 2025"
+
+# 6. Ask a question
 python scripts/ask.py "How much did I spend on dining in Q1?"
 
-# 6. Run the eval suite (DeepEval RAG-triad on 20 golden Q&A)
+# 7. Run the eval suite (DeepEval RAG-triad on 20 golden Q&A)
 pytest tests/
 ```
 
