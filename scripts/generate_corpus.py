@@ -4,7 +4,7 @@ generate_corpus.py — Synthesize a deterministic transaction corpus for RAG eva
 Honest framing: this is synthetic, not real bank data. The predecessor
 finance-pipeline (https://github.com/HarshPatel7x/finance-pipeline) ingests
 Plaid sandbox data; real BofA development-mode OAuth was never completed.
-This generator produces a corpus large enough (~840 records, 12 months,
+This generator produces a corpus large enough (693 records (default args), 12 months,
 15 categories) to make the contextual-recall@5 and faithfulness metrics
 meaningful.
 

@@ -13,9 +13,6 @@ langchain-chroma>=0.1
 voyageai>=0.2
 langchain-voyageai>=0.1
 
-# --- Text chunking: 512-token chunks per DECISIONS row 5 ---
-langchain-text-splitters>=0.3
-
 # --- Hybrid retrieval: BM25 keyword side ---
 rank-bm25>=0.2
 

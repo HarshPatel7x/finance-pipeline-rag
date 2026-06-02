@@ -6,7 +6,7 @@
 
 > **Corpus note:** the project ships with a **synthetic corpus** of ~500-1000 transactions, deterministically generated to exercise retrieval quality across 15-20 categories and 12 months. This is honest about scope — the predecessor [`finance-pipeline`](https://github.com/HarshPatel7x/finance-pipeline) ingests Plaid-sandbox data; real BofA `development`-mode OAuth was a known unresolved blocker. The retrieval + eval logic is corpus-agnostic — swap in real DynamoDB output once available without changing the pipeline.
 
-> **Status:** Steps 1–7 shipped (skeleton → synthetic corpus → Chroma index → hybrid retrieval → grounded generation → DeepEval eval harness → CI gate). Eval suite + GitHub Actions gate are live. Build steps tracked in [`plans/WORKITEMS.md` §#1](../plans/WORKITEMS.md).
+> **Status:** Steps 1–7 shipped (skeleton → synthetic corpus → Chroma index → hybrid retrieval → grounded generation → DeepEval eval harness → CI gate). Eval suite + GitHub Actions gate are live. Per-step build notes are in [`notes/`](./notes/).
 
 ---
 
@@ -16,7 +16,7 @@ This repo exists to be the working proof behind these lines on the AI resume —
 
 - **RAG pipeline over banking-history corpus:** LangChain orchestration + Chroma vector store + Claude API generation.
 - **Hybrid retrieval** (BM25 keyword filter + dense semantic embedding) following the **Anthropic Contextual Retrieval** pattern — chunk-level contextual prefix added before embedding, then reranking on top-k candidates.
-- **DeepEval test suite** — faithfulness, answer-relevancy, contextual-recall, and hallucination-rate metrics (DeepEval RAG-triad) — running on every commit via GitHub Actions CI/CD.
+- **DeepEval test suite** — faithfulness, answer-relevancy, contextual-recall, and hallucination-rate metrics (DeepEval RAG-triad) — running on every pipeline-touching pull request via GitHub Actions CI/CD.
 - **Targets:** hallucination rate <5%, faithfulness >0.85, contextual-recall@5 >0.85, p95 retrieval latency <200 ms.
 - **Reusable eval harness** pluggable into downstream agent + MCP projects.
 
@@ -26,7 +26,7 @@ This repo exists to be the working proof behind these lines on the AI resume —
 
 ```mermaid
 flowchart LR
-    A[DynamoDB transactions<br/>CSV export] --> B[Chunker<br/>512 tok + 50-tok contextual prefix]
+    A[Synthetic transactions<br/>Plaid-shaped JSON] --> B[Chunker<br/>1 chunk/txn + ~50-tok contextual prefix]
     B --> C[Voyage-3-large<br/>embedding]
     C --> D[(Chroma<br/>persistent local DB)]
     Q[User question] --> E[Hybrid retriever<br/>BM25 + dense]
@@ -52,7 +52,7 @@ Measured by the Step-6 DeepEval RAG-triad over a 20-question golden set, **stron
 | Trick-question refusals | grounding guard | **4/4 ✅** | judge-independent (exact refusal-match) |
 | p95 retrieval latency | <200 ms | **470 ms** ❌ (p50 405, n=40) | two Voyage network round-trips (embed + rerank) dominate; a co-located or local reranker would close the gap |
 
-**Judge-dependence (key finding).** The numbers above come from a strong judge. A controlled A/B (`eval/compare_judges.py`) over the *identical* 20 cases with a weak local-8B judge scored the **same system** 0.593 / 0.671 / 0.700 — failing all three — because the weak judge mis-scores (e.g. 0.0 faithfulness on a correct answer). An 0.85 gate is only trustworthy with a capable judge, so CI uses a **Groq-first / local-Ollama-fallback** judge. Full detail: `notes/step-06-eval-harness.md` Finding 5.
+**Judge-dependence (key finding).** The numbers above come from a strong judge. A controlled A/B (`eval/compare_judges.py`) over the *identical* 20 cases with a weak local-8B judge scored the **same system** 0.593 / 0.671 / 0.700 — failing all three — because the weak judge mis-scores (e.g. 0.0 faithfulness on a correct answer). An 0.85 gate is only trustworthy with a capable judge: locally the eval grades with a **Groq-first → local-Ollama-fallback** 70B chain, and **CI** uses a strong cloud judge (**OpenRouter** 70B — Ollama isn't available on GitHub runners). Full detail: `notes/step-06-eval-harness.md` Finding 5.
 
 **Honesty rule:** metrics are reported as actually measured, with the judge noted. No silent fudging — the weak-judge numbers are shown right beside the strong-judge ones.
 
@@ -68,10 +68,10 @@ Measured by the Step-6 DeepEval RAG-triad over a 20-question golden set, **stron
 | Reranker | Voyage rerank-2 | Same vendor as embed → single API integration; typically >5pp recall lift |
 | Generation | Claude (Haiku dev / Sonnet eval) | Haiku for fast iteration; Sonnet for eval runs that need higher fidelity |
 | Eval framework | DeepEval | RAG-triad metrics (faithfulness, recall, relevancy); industry-standard |
-| Eval judge LLM | Resilient: Groq/OpenRouter Llama-3.3-70B → local Ollama fallback | A strong judge gates honestly (a weak 8B lowballs a good system — see eval Finding 5); local Ollama is the free/offline fallback |
+| Eval judge LLM | Resilient 70B chain — local: Groq → Ollama fallback; CI: OpenRouter (no Ollama on runners) | A strong judge gates honestly (a weak 8B lowballs a good system — see eval Finding 5); local Ollama is the free/offline fallback |
 | CI | GitHub Actions (`.github/workflows/eval.yml`) | Eval runs on PRs touching the pipeline; merge gated on the triad thresholds (`run_eval` exits non-zero on fail) |
 
-Full pre-code decision log: see [`plans/DECISIONS.md` §P2-decisions](../plans/DECISIONS.md) (mirrored copy will land in this repo at Step 2).
+Key decisions are summarized in the table above; per-step rationale lives in [`notes/`](./notes/).
 
 ---
 
@@ -88,8 +88,10 @@ pip install -r requirements.txt
 
 # 2. Configure API keys
 cp .env.example .env
-# Edit .env: VOYAGE_API_KEY + ANTHROPIC_API_KEY (required).
-# Optional: OPENROUTER_API_KEY for the strong cloud judge (else the local Ollama fallback grades).
+# Edit .env: VOYAGE_API_KEY + ANTHROPIC_API_KEY (required for retrieval + generation).
+# For the eval suite (step 8): GROQ_API_KEY (default judge, free tier) — or set
+#   JUDGE_CHAIN=ollama/llama3.1 to grade fully locally with no cloud judge key.
+# Optional: OPENROUTER_API_KEY — used by the judge A/B (eval/compare_judges.py) and CI.
 
 # 3. Start the local judge LLM (one-time pull, then daemon)
 ollama pull llama3.1:8b
@@ -103,14 +105,17 @@ python scripts/build_index.py       # → chroma_db/ (Voyage embeddings, persist
 # 5. (Optional) Verify hybrid retrieval — prints top-5 chunks for a sample query
 python scripts/retrieve.py "Vietnamese food in summer 2025"
 
-# 6. Ask a question
+# 6. Ask a question (full RAG: retrieve → ground on Claude → cite chunks)
 python scripts/ask.py "How much did I spend on dining in Q1?"
 
-# 7. Run the eval suite (DeepEval RAG-triad on 20 golden Q&A)
+# 7. Run the unit tests
 pytest tests/
-```
 
-> Scripts under `scripts/` and `tests/` will land in Steps 2–6. This README ships the final intended UX up front so the surface area is locked.
+# 8. Run the eval suite (DeepEval RAG-triad on the 20-question golden set)
+#    Needs the index (step 4) + ANTHROPIC/VOYAGE keys + a judge key (step 2),
+#    or JUDGE_CHAIN=ollama/llama3.1 to grade fully locally.
+python -m eval.run_eval
+```
 
 ---
 
