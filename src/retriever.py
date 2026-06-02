@@ -21,8 +21,33 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_voyageai import VoyageAIEmbeddings
 from rank_bm25 import BM25Okapi
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 load_dotenv()  # picks up VOYAGE_API_KEY from .env
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for Voyage/network blips worth retrying (connection drops, timeouts,
+    rate limits, 5xx) — but NOT 4xx/bad-request, which are real and shouldn't retry."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if any(t in name for t in ("connection", "timeout", "ratelimit", "serviceunavailable")):
+        return True
+    return any(
+        t in msg
+        for t in ("connection aborted", "remotedisconnected", "timed out",
+                  "temporarily", "rate limit", " 502", " 503", " 504")
+    )
+
+
+# Retry Voyage network calls (embed + rerank): a transient drop shouldn't fail a
+# run — or, at Step 7, the CI gate. Reraises the real error after 5 attempts.
+_voyage_retry = retry(
+    retry=retry_if_exception(_is_transient),
+    wait=wait_exponential(multiplier=1, min=1, max=20),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -136,6 +161,21 @@ class HybridRetriever:
 
     # --- the core (YOU WRITE THIS) ---
 
+    @_voyage_retry
+    def _dense_search(self, query: str, candidate_k: int):
+        """Voyage-embedded dense search (Chroma). Retried on transient Voyage drops."""
+        return self.chroma_store.similarity_search(query, k=candidate_k)
+
+    @_voyage_retry
+    def _rerank(self, query: str, fused: list[dict], k: int):
+        """Voyage rerank-2 cross-encoder pass. Retried on transient Voyage drops."""
+        return self.voyage_client.rerank(
+            query=query,
+            documents=[c["text"] for c in fused],
+            model=self.rerank_model,
+            top_k=k,
+        )
+
     def retrieve(
         self,
         query: str,
@@ -162,7 +202,7 @@ class HybridRetriever:
         Returns:
             list of length k: [{"id": str, "text": str, "metadata": dict, "score": float}, ...]
         """
-        dense_docs = self.chroma_store.similarity_search(query, k=candidate_k)
+        dense_docs = self._dense_search(query, candidate_k)
 
         query_tokens = _tokenize(query)
         bm25_texts = self.bm25.get_top_n(
@@ -170,13 +210,8 @@ class HybridRetriever:
         )
 
         fused = self._fuse(dense_docs, bm25_texts)
-        
-        rerank_result = self.voyage_client.rerank(
-            query=query,
-            documents=[c["text"] for c in fused],
-            model=self.rerank_model,
-            top_k=k,
-        )
+
+        rerank_result = self._rerank(query, fused, k)
 
         return [
             {

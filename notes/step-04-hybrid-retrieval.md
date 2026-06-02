@@ -109,6 +109,25 @@ Fusion helper `_fuse()` is dense-first, BM25-fills-gaps, dedupe-by-id. ID round-
 
 ---
 
+## Hardening — retry on transient Voyage failures (added 2026-06-01, ships with Step 7)
+
+The two network calls in `retrieve()` both hit Voyage — the embed for dense search
+(`similarity_search`) and the `rerank-2` pass. Either can drop transiently: a Voyage
+`RemoteDisconnected` crashed a full eval run mid-pass on 2026-06-01.
+
+Fix: each call is isolated into its own method (`_dense_search`, `_rerank`) wrapped
+with a `tenacity` retry (`@_voyage_retry`):
+- exponential backoff, up to 5 attempts;
+- retries **only transient** errors (connection drops, timeouts, 5xx, rate limits)
+  via the `_is_transient` predicate, and **reraises real 4xx/bad-request errors
+  unchanged** — a genuine bug still fails loudly instead of being silently retried.
+
+Why it matters: at **Step 7** the eval becomes a CI merge gate, so a random network
+blip must not fail the gate. (Sister resilience item: the eval *judge* gets a
+Groq-first / local-Ollama-fallback wrapper for the same reason.)
+
+---
+
 ## Glossary cross-refs
 
 - [Hybrid retrieval](./glossary.md#hybrid-retrieval) — the 3-stage pipeline
