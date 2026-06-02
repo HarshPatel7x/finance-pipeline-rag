@@ -39,3 +39,7 @@ build/
 # OS-level junk
 .DS_Store
 Thumbs.db
+
+# DeepEval local telemetry/cache
+.deepeval/
+.deepeval_telemetry.txt
