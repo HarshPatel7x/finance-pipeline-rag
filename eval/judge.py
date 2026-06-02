@@ -40,6 +40,25 @@ def _is_rate_limit(exc: BaseException) -> bool:
     return isinstance(exc, litellm.RateLimitError) or "rate_limit" in str(exc).lower()
 
 
+def _is_bad_completion(exc: BaseException) -> bool:
+    """A structurally-empty / unparseable judge response — not a transport error.
+
+    Seen in CI: OpenRouter load-balanced a request to a backend (Parasail) that
+    returned finish_reason="tool_calls" with an EMPTY payload (content=None,
+    tool_calls=None). instructor exhausts its re-asks against the same routed
+    backend and raises InstructorRetryException wrapping a pydantic json_invalid
+    ValidationError. A different backend usually succeeds, so treat this as
+    advance-to-next-backend worthy rather than a hard crash."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return (
+        "instructorretry" in name
+        or "validationerror" in name
+        or "json_invalid" in msg
+        or "validation error for" in msg
+    )
+
+
 class ResilientJudge(DeepEvalBaseLLM):
     """Groq-first, local-Ollama-fallback judge. Sticky: once a backend hits a
     rate-limit/quota it permanently advances to the next for the rest of the run
@@ -65,6 +84,14 @@ class ResilientJudge(DeepEvalBaseLLM):
         kw = {"model": model, "temperature": 0}
         if model.startswith("groq/"):
             kw["api_key"] = os.environ["GROQ_API_KEY"]
+        if model.startswith("openrouter/"):
+            # OpenRouter silently load-balances across backend providers; some
+            # (observed: Parasail) return an empty tool-call response instructor
+            # can't parse, crashing the eval. Route only to providers that honor
+            # our structured request, and exclude the known-bad one.
+            kw["extra_body"] = {
+                "provider": {"require_parameters": True, "ignore": ["Parasail"]}
+            }
         return kw
 
     def _run(self, prompt: str, schema: type[BaseModel] | None):
@@ -81,17 +108,19 @@ class ResilientJudge(DeepEvalBaseLLM):
                         messages=msgs, response_model=schema, max_retries=3,
                         **self._kwargs(model),
                     )
-                except Exception as e:  # noqa: BLE001 — re-raised below unless rate-limit
+                except Exception as e:  # noqa: BLE001 — re-raised below unless retryable
                     last = e
-                    if not _is_rate_limit(e):
-                        raise
-                    msg = str(e).lower()
-                    if ("per minute" in msg or "tpm" in msg) and attempt < 3:
-                        time.sleep(5)  # per-minute throttle → wait the window, retry
-                        continue
-                    break  # daily/quota or minute-retries exhausted → advance backend
+                    if _is_rate_limit(e):
+                        msg = str(e).lower()
+                        if ("per minute" in msg or "tpm" in msg) and attempt < 3:
+                            time.sleep(5)  # per-minute throttle → wait the window, retry
+                            continue
+                        break  # daily/quota or minute-retries exhausted → advance backend
+                    if _is_bad_completion(e):
+                        break  # empty/unparseable provider output → advance to next backend
+                    raise
             self._idx += 1  # sticky fall to the next backend
-        raise RuntimeError(f"All judge backends exhausted (rate-limited). Last: {last}")
+        raise RuntimeError(f"All judge backends exhausted. Last: {last}")
 
     def generate(self, prompt: str, schema: type[BaseModel] | None = None):
         return self._run(prompt, schema)
