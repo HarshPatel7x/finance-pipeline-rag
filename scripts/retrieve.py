@@ -13,8 +13,14 @@ convention from Step 3 (scripts/ = CLI entry, src/ = library).
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from src.retriever import verify_retrieve
+# Make `src.*` imports work when this script is invoked directly from the repo
+# root (e.g. `python scripts/retrieve.py "..."`). Pytest handles this via
+# pyproject.toml `pythonpath = ["."]`; plain scripts don't.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.retriever import verify_retrieve  # noqa: E402  (import-after-sys.path-fix)
 
 
 def main() -> None:
