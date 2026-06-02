@@ -145,14 +145,32 @@ Refusals scored by exact-match on the REFUSAL string, excluded from the triad. 4
 ### Finding 2 (partial) — payroll sign
 Payroll stored negative (`-1175`). Q5 reframed to a date question (fixed). Q6 residual: the *generator* still answers `$2,350.00` positive vs the negative chunk → minor generator-side issue, not the harness.
 
-### Finding 5 (THE BIG ONE) — the score is judge-dependent; a weak judge makes the gate lie
-The local **8B** judge scores everything ~0.65. But the **strong** Groq judges (llama-3.3-70B / gpt-oss-120B) rated exact-facts **near-perfect (1.00)** in the per-question diagnostic. The ~0.65 is largely the 8B fumbling the "is this answer supported by the chunk?" reasoning, **not** the RAG system being weak. **Implication: a 0.85 quality gate is only meaningful with a strong judge.** This is why CI needs the strong judge (Step 7) — and why the local 8B can't be the trusted grader.
+### Finding 5 (THE BIG ONE, PROVEN) — the score is judge-dependent; a weak judge makes the gate lie
+Controlled A/B (`eval/compare_judges.py`, 2026-06-02): the SAME 20 test cases — built
+**once** (one retrieve + generate pass), so question + answer + retrieved context are
+identical — scored by two judges. The ONLY variable across the columns is the judge.
 
-### TODO tomorrow — controlled judge comparison (logs the proof)
-Re-run the SAME 20 questions on the Groq **70B** judge (free daily quota resets) and log the numbers side-by-side with this local-8B run. Same goldens, same harness, only the judge swapped → quantifies the judge-quality delta and turns Finding 5 into hard evidence. Then update this note + the README metrics table.
+| metric | weak local-8B | strong OpenRouter Llama-3.3-70B |
+|---|---|---|
+| faithfulness | **0.593** ❌ | **0.948** ✅ |
+| answer_relevancy | **0.671** ❌ | **0.906** ✅ |
+| contextual_recall | **0.700** ❌ | **1.000** ✅ |
+| trick refusals | 4/4 | 4/4 |
 
-> Cross-refs: `glossary.md` (bi-encoder vs cross-encoder, grounding), `step-05-generation.md`
-> (the generator + CITED: line this harness grades).
+*(faith/relev over n=16 non-neg; recall over recall_n=8 exact_fact; threshold 0.85.)*
+
+**Same system, same answers — swap only the grader and it flips FAIL → PASS on all three.**
+The weak 8B isn't merely lower, it's *noisy/unreliable*: it gave faithfulness **0.0 to a
+correct answer** (Q7 Foxtail) and 0.67 to the clean Costco fact (strong judge: 1.0). On
+2/20 the strong judge is actually *stricter* (Q8, Q20) — so the honest framing is "the weak
+judge mis-scores and on balance lowballs a good system below the gate," not "strong inflates."
+
+**Implication: an 0.85 quality gate is only trustworthy with a capable judge.** That is the
+Step-7 judge design: Groq-first / local-Ollama-fallback (`eval/judge.py`), with
+OpenRouter-hosted Llama-3.3-70B as the strong cloud option — Groq's free tier caps a full
+run at ~13 Q/day and its paid tier was unavailable, so OpenRouter serves the same 70B
+uncapped at ~$0.10/run. Refusals (4/4) are judge-independent (string match), so they're
+identical across both columns — a nice control.
 
 > Cross-refs: `glossary.md` (bi-encoder vs cross-encoder, grounding), `step-05-generation.md`
 > (the generator + CITED: line this harness grades).

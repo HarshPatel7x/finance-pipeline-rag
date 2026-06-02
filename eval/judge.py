@@ -1,110 +1,107 @@
 """
-eval/judge.py — the LLM-as-judge for the RAG-triad metrics.
+eval/judge.py — resilient LLM-as-judge for the RAG-triad metrics.
 
-WHY not Claude as judge: our generator is Claude (Sonnet); a Claude judge would
-score its own family too high (self-preference bias). We use a NON-Claude judge.
+NON-Claude judge on purpose: the generator is Claude (Sonnet); a Claude judge would
+self-prefer (grade its own family too high), inflating scores. We grade with Llama.
 
-WHY this shape (custom DeepEvalBaseLLM + instructor):
-  DeepEval scores via structured (Pydantic-schema) verdicts. DeepEval's stock
-  LiteLLMModel asks Groq for that schema via Groq's *server-side* strict JSON
-  validation — and Groq rejects partial output (e.g. a verdict missing `reason`)
-  with `tool_use_failed` / `json_validate_failed`. The local Ollama judge worked
-  only because Ollama doesn't strict-validate.
-  Fix (DeepEval's own recommended pattern): wrap litellm with `instructor`, which
-  coerces output into the schema CLIENT-SIDE and *re-asks the model* on a bad
-  parse (max_retries). Groq never strict-rejects; instructor guarantees a valid
-  schema instance. Groq-hosted Llama-3.3-70B → fast, free-tier, non-Claude.
+Strategy (user pref 2026-06-01): try the fast Groq free tier FIRST, auto-fall-back
+to the local Ollama model when Groq hits a rate-limit/quota. Same model family
+(llama-3) both ends → scoring stays consistent across a fallback.
+
+Uniform path: `instructor` wraps `litellm` for BOTH backends, coercing DeepEval's
+structured (Pydantic-schema) verdicts CLIENT-SIDE with re-asks. Required because
+Groq strict-validates schemas server-side and rejects partial JSON
+(`tool_use_failed` / `json_validate_failed`); instructor re-asks until valid, so the
+return contract is identical no matter which backend served the call.
 
 This file is plumbing, not the rep — provided complete. The rep is run_eval.py.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
 import instructor
-from deepeval.models import DeepEvalBaseLLM, OllamaModel
+import litellm
+from deepeval.models import DeepEvalBaseLLM
 from litellm import completion
 from pydantic import BaseModel
 
-JUDGE_MODEL = "groq/llama-3.1-8b-instant"
-# Local fallback judge — no rate limits, no daily quota, just slow (~25 min/run).
-LOCAL_JUDGE_MODEL = "llama3.1"
-OLLAMA_URL = "http://localhost:11434"
+# Ordered backends: Groq free tier first (fast), local Ollama as the no-limit
+# fallback. Override with JUDGE_CHAIN env var (comma-separated litellm model ids) —
+# e.g. JUDGE_CHAIN=groq/llama-3.3-70b-versatile for a pure-Groq run.
+DEFAULT_CHAIN = ["groq/llama-3.3-70b-versatile", "ollama/llama3.1"]
 
 
-class GroqJudge(DeepEvalBaseLLM):
-    """DeepEval judge backed by Groq (via litellm) with instructor schema coercion.
+def _is_rate_limit(exc: BaseException) -> bool:
+    """A Groq/litellm rate-limit or quota error — the typed error, or an
+    instructor-wrapped one whose message carries the rate_limit code."""
+    return isinstance(exc, litellm.RateLimitError) or "rate_limit" in str(exc).lower()
 
-    INACTIVE (get_judge returns the local Ollama judge). BEFORE activating this on
-    a paid/reset Groq tier, fix 3 latent issues (audit 2026-06-01, see Task #2):
-      1. call `super().__init__(model)` (base sets self.name/self.model);
-      2. make `a_generate` truly async (it currently calls the sync, blocking
-         `generate` with time.sleep inside the event loop) — use asyncio.to_thread;
-      3. `_backoff` should match `isinstance(e, litellm.RateLimitError)` not a string,
-         and raise after the loop (no silent None return).
-    """
 
-    def __init__(self, model: str = JUDGE_MODEL):
-        self.model_name = model
-        # JSON mode + client-side validation/retries — sidesteps Groq's strict
-        # server-side schema validation that DeepEval's default path tripped on.
+class ResilientJudge(DeepEvalBaseLLM):
+    """Groq-first, local-Ollama-fallback judge. Sticky: once a backend hits a
+    rate-limit/quota it permanently advances to the next for the rest of the run
+    (no re-hammering a dead quota on every metric call)."""
+
+    def __init__(self, chain: list[str] | None = None):
+        env_chain = os.environ.get("JUDGE_CHAIN")
+        self.chain = chain or (
+            [m.strip() for m in env_chain.split(",")] if env_chain else DEFAULT_CHAIN
+        )
+        self._idx = 0
+        # JSON mode + client-side validation/retries — see module docstring.
         self.client = instructor.from_litellm(completion, mode=instructor.Mode.JSON)
+        super().__init__(self.chain[self._idx])
 
     def load_model(self):
         return self.client
 
-    def _backoff(self, fn, attempts: int = 12):
-        # Groq free tier caps the 70B at ~12k tokens/minute; a burst of judge
-        # calls trips it (`rate_limit_exceeded`). It's a throttle, not a failure —
-        # wait out the per-minute window and retry.
-        for i in range(attempts):
-            try:
-                return fn()
-            except Exception as e:  # noqa: BLE001 — narrow on the message text
-                if i < attempts - 1 and "rate_limit" in str(e).lower():
-                    time.sleep(5)
-                    continue
-                raise
+    def get_model_name(self) -> str:
+        return self.chain[self._idx]
+
+    def _kwargs(self, model: str) -> dict:
+        kw = {"model": model, "temperature": 0}
+        if model.startswith("groq/"):
+            kw["api_key"] = os.environ["GROQ_API_KEY"]
+        return kw
+
+    def _run(self, prompt: str, schema: type[BaseModel] | None):
+        msgs = [{"role": "user", "content": prompt}]
+        last = None
+        while self._idx < len(self.chain):
+            model = self.chain[self._idx]
+            for attempt in range(4):
+                try:
+                    if schema is None:
+                        r = completion(messages=msgs, **self._kwargs(model))
+                        return r.choices[0].message.content
+                    return self.client.chat.completions.create(
+                        messages=msgs, response_model=schema, max_retries=3,
+                        **self._kwargs(model),
+                    )
+                except Exception as e:  # noqa: BLE001 — re-raised below unless rate-limit
+                    last = e
+                    if not _is_rate_limit(e):
+                        raise
+                    msg = str(e).lower()
+                    if ("per minute" in msg or "tpm" in msg) and attempt < 3:
+                        time.sleep(5)  # per-minute throttle → wait the window, retry
+                        continue
+                    break  # daily/quota or minute-retries exhausted → advance backend
+            self._idx += 1  # sticky fall to the next backend
+        raise RuntimeError(f"All judge backends exhausted (rate-limited). Last: {last}")
 
     def generate(self, prompt: str, schema: type[BaseModel] | None = None):
-        key = os.environ["GROQ_API_KEY"]
-        if schema is None:
-            resp = self._backoff(
-                lambda: completion(
-                    model=self.model_name,
-                    api_key=key,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                )
-            )
-            return resp.choices[0].message.content
-        return self._backoff(
-            lambda: self.client.chat.completions.create(
-                model=self.model_name,
-                api_key=key,
-                messages=[{"role": "user", "content": prompt}],
-                response_model=schema,
-                temperature=0,
-                max_retries=3,
-            )
-        )
+        return self._run(prompt, schema)
 
     async def a_generate(self, prompt: str, schema: type[BaseModel] | None = None):
-        return self.generate(prompt, schema)
+        # DeepEval scores via a_generate inside an event loop; run the sync path
+        # off-loop so the time.sleep backoff can't stall the loop.
+        return await asyncio.to_thread(self._run, prompt, schema)
 
-    def get_model_name(self) -> str:
-        return self.model_name
 
-
-def get_judge():
-    """Return the active judge for the triad metrics.
-
-    Currently LOCAL Ollama — the Groq path (GroqJudge above) is code-complete and
-    proven (instructor coercion + backoff), but Groq's FREE tier rate-limits a full
-    20-question run: the 70B exhausts its ~100k tokens/day quota, and the 8B's
-    6000 tokens/MINUTE throttle is blown by instructor's re-ask bursts. Flip the
-    return to `GroqJudge()` once on a paid Dev tier or after the daily quota resets.
-    Local has no limits — just slow. (2026-06-01)
-    """
-    return OllamaModel(model=LOCAL_JUDGE_MODEL, base_url=OLLAMA_URL, temperature=0)
+def get_judge(chain: list[str] | None = None) -> ResilientJudge:
+    """Return the Groq-first / local-Ollama-fallback judge for the triad metrics."""
+    return ResilientJudge(chain)
