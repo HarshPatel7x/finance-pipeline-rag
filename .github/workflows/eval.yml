@@ -1,0 +1,64 @@
+name: RAG eval gate
+
+# Runs the DeepEval RAG-triad on PRs that touch the pipeline and gates the merge on
+# the faithfulness / answer-relevancy / contextual-recall thresholds (eval/run_eval.py
+# exits non-zero on failure).
+#
+# Judge = a strong CLOUD judge (OpenRouter Llama-3.3-70B). The local Ollama judge is
+# not available on GitHub runners, and the controlled A/B in notes/step-06 Finding 5
+# showed a weak judge can't be trusted to gate (it lowballs a good system below 0.85).
+#
+# REQUIRED repo secrets — Settings → Secrets and variables → Actions:
+#   ANTHROPIC_API_KEY   generation (Claude Sonnet — the system under test)
+#   VOYAGE_API_KEY      embeddings + rerank (retrieval and the index build)
+#   OPENROUTER_API_KEY  the strong judge
+#
+# Cost/time: ~$0.30–0.50 and ~3–5 min per run (20 Claude generations + Voyage +
+# judge). The index embed (~$1) is paid only when data/corpus.json changes (cached).
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "eval/**"
+      - "data/**"
+      - "requirements.txt"
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # The Chroma index (embeddings) is rebuilt-not-committed; cache it keyed on the
+      # corpus so the Voyage embed cost is paid only when the corpus actually changes.
+      - name: Cache Chroma index
+        id: chroma-cache
+        uses: actions/cache@v4
+        with:
+          path: chroma_db
+          key: chroma-${{ hashFiles('data/corpus.json') }}
+
+      - name: Build index (on cache miss)
+        if: steps.chroma-cache.outputs.cache-hit != 'true'
+        env:
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+        run: python scripts/build_index.py
+
+      - name: RAG-triad eval gate (strong cloud judge)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          JUDGE_CHAIN: openrouter/meta-llama/llama-3.3-70b-instruct
+        run: PYTHONPATH=. python -m eval.run_eval
