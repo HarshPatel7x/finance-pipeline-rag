@@ -341,6 +341,30 @@ If you ever accidentally commit a `.env`, **rotate the keys immediately** — on
 
 ---
 
+## 17. Bi-encoder vs cross-encoder
+
+**Bi-encoder** (the dense-retrieval side): embeds the query and each chunk *separately* into vectors, then compares by cosine similarity. Fast — embed the 693 chunks once, then every query is one embedding + a vector lookup. Trade-off: it never sees query and chunk *together*, so it can miss subtle relevance.
+
+**Cross-encoder** (the rerank side — Voyage rerank-2): feeds the query AND a chunk through the model *together* and scores the pair directly. Far more accurate at "does this chunk answer this query?" — but slow, so it runs only on the ~30 candidates the bi-encoder + BM25 already surfaced, not the whole corpus. Bi-encoder casts the wide cheap net; cross-encoder does the narrow sharp ranking. (See §9 dense retrieval, §12 reranking.)
+
+---
+
+## 18. Recall ceiling (top-k)
+
+The retriever returns the top **k** chunks (here k=5). If answering correctly needs *more* than k chunks — e.g. "total internet spend this summer" needs all 3 monthly bills — then no matter how good retrieval is, it physically can't hand the generator everything. That's the **recall ceiling**: an upper bound set by k. It's why aggregate questions stress contextual-recall, and why a broad "total over 30 transactions" question can't be answered from a top-5 retrieve. Fix: raise k, pre-aggregate, or accept the ceiling for broad questions. (See §14 eval metrics; eval Finding 4.)
+
+---
+
+## 19. LLM-as-a-judge (and judge-dependence)
+
+**What:** scoring a model's output with *another* LLM instead of a human or a regex. The eval triad (faithfulness / relevancy / recall) is computed by a judge LLM that reads (question, answer, retrieved context) and emits a structured verdict.
+
+**Why a non-Claude judge:** the generator is Claude; a Claude judge would self-prefer (score its own family high). We grade with Llama to stay honest.
+
+**Judge-dependence (the big lesson — Finding 5):** the judge's *quality* moves the scores a lot. On the identical 20 cases, a weak local-8B judge scored the system 0.59 / 0.67 / 0.70 (FAIL) while a strong 70B scored 0.95 / 0.91 / 1.00 (PASS) — same system, only the grader changed. A quality gate is only trustworthy with a capable judge. (See `step-06-eval-harness.md` Finding 5.)
+
+---
+
 ## How to use this glossary
 
 - **First time read:** go top-to-bottom. Concepts are ordered so each one builds on the previous.

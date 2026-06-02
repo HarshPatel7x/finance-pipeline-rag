@@ -142,6 +142,8 @@ def main() -> None:
     print(f"  contextual_recall {report.contextual_recall:.3f} (over {report.recall_n} exact_fact cases; aggregates excluded)  (target >{THRESHOLD})")
     print(f"trick questions correctly refused: {report.tricks_passed} out of {report.tricks_n}.")
     print(f"\n{'PASS' if report.passed else 'FAIL'} — all three must clear {THRESHOLD}")
+    # Non-zero exit on failure so this can gate a CI merge (Step 7).
+    raise SystemExit(0 if report.passed else 1)
 
 
 if __name__ == "__main__":

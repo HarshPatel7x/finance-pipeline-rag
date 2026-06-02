@@ -1,10 +1,12 @@
 # finance-pipeline-rag
 
+[![RAG eval gate](https://github.com/HarshPatel7x/finance-pipeline-rag/actions/workflows/eval.yml/badge.svg)](https://github.com/HarshPatel7x/finance-pipeline-rag/actions/workflows/eval.yml)
+
 > RAG pipeline over a banking-history corpus — LangChain orchestration + Chroma vector store + Claude API generation. Hybrid retrieval (BM25 + dense embedding) following the Anthropic Contextual Retrieval pattern, with reranking and a DeepEval CI eval suite.
 
 > **Corpus note:** the project ships with a **synthetic corpus** of ~500-1000 transactions, deterministically generated to exercise retrieval quality across 15-20 categories and 12 months. This is honest about scope — the predecessor [`finance-pipeline`](https://github.com/HarshPatel7x/finance-pipeline) ingests Plaid-sandbox data; real BofA `development`-mode OAuth was a known unresolved blocker. The retrieval + eval logic is corpus-agnostic — swap in real DynamoDB output once available without changing the pipeline.
 
-> **Status:** WIP — Steps 1-4 shipped 2026-05-27→2026-05-28 (skeleton + synthetic corpus + Chroma index + hybrid retrieval). Build steps tracked in [`plans/WORKITEMS.md` §#1](../plans/WORKITEMS.md). Hard ship date: **2026-06-02**.
+> **Status:** Steps 1–7 shipped (skeleton → synthetic corpus → Chroma index → hybrid retrieval → grounded generation → DeepEval eval harness → CI gate). Eval suite + GitHub Actions gate are live. Build steps tracked in [`plans/WORKITEMS.md` §#1](../plans/WORKITEMS.md).
 
 ---
 
@@ -34,7 +36,7 @@ flowchart LR
     G --> H[Answer + cited chunks]
 ```
 
-The pipeline embeds each transaction chunk with a contextual prefix (per the Anthropic 2024 pattern) so retrieval sees "context + content," not just content. At query time, BM25 catches exact merchant matches that dense retrieval misses; dense catches semantic matches BM25 misses; the union is reranked by Voyage rerank-2 and fed to Claude for citation-grounded generation.
+The pipeline embeds each transaction chunk with a contextual prefix (per Anthropic's [Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) pattern, 2024) so retrieval sees "context + content," not just content. At query time, BM25 catches exact merchant matches that dense retrieval misses; dense catches semantic matches BM25 misses; the union is reranked by Voyage rerank-2 and fed to Claude for citation-grounded generation.
 
 ---
 
@@ -48,7 +50,7 @@ Measured by the Step-6 DeepEval RAG-triad over a 20-question golden set, **stron
 | Answer relevancy | >0.85 | **0.906 ✅** | weak 8B: 0.671 |
 | Contextual recall @ 5 | >0.85 | **1.000 ✅** (8 exact-fact) | aggregates excluded — a computed total isn't verbatim in any chunk; weak 8B: 0.700 |
 | Trick-question refusals | grounding guard | **4/4 ✅** | judge-independent (exact refusal-match) |
-| p95 retrieval latency | <200 ms | *not yet measured* | Step 8 |
+| p95 retrieval latency | <200 ms | **470 ms** ❌ (p50 405, n=40) | two Voyage network round-trips (embed + rerank) dominate; a co-located or local reranker would close the gap |
 
 **Judge-dependence (key finding).** The numbers above come from a strong judge. A controlled A/B (`eval/compare_judges.py`) over the *identical* 20 cases with a weak local-8B judge scored the **same system** 0.593 / 0.671 / 0.700 — failing all three — because the weak judge mis-scores (e.g. 0.0 faithfulness on a correct answer). An 0.85 gate is only trustworthy with a capable judge, so CI uses a **Groq-first / local-Ollama-fallback** judge. Full detail: `notes/step-06-eval-harness.md` Finding 5.
 
@@ -66,8 +68,8 @@ Measured by the Step-6 DeepEval RAG-triad over a 20-question golden set, **stron
 | Reranker | Voyage rerank-2 | Same vendor as embed → single API integration; typically >5pp recall lift |
 | Generation | Claude (Haiku dev / Sonnet eval) | Haiku for fast iteration; Sonnet for eval runs that need higher fidelity |
 | Eval framework | DeepEval | RAG-triad metrics (faithfulness, recall, relevancy); industry-standard |
-| Eval judge LLM | Ollama Llama-3.1-8B (local) | $0 per eval run; replaces paid LLM judge for cost control |
-| CI | GitHub Actions | Eval suite runs on every commit; merge gated on `faithfulness > 0.85` |
+| Eval judge LLM | Resilient: Groq/OpenRouter Llama-3.3-70B → local Ollama fallback | A strong judge gates honestly (a weak 8B lowballs a good system — see eval Finding 5); local Ollama is the free/offline fallback |
+| CI | GitHub Actions (`.github/workflows/eval.yml`) | Eval runs on PRs touching the pipeline; merge gated on the triad thresholds (`run_eval` exits non-zero on fail) |
 
 Full pre-code decision log: see [`plans/DECISIONS.md` §P2-decisions](../plans/DECISIONS.md) (mirrored copy will land in this repo at Step 2).
 
@@ -86,7 +88,8 @@ pip install -r requirements.txt
 
 # 2. Configure API keys
 cp .env.example .env
-# Edit .env: fill in VOYAGE_API_KEY and ANTHROPIC_API_KEY
+# Edit .env: VOYAGE_API_KEY + ANTHROPIC_API_KEY (required).
+# Optional: OPENROUTER_API_KEY for the strong cloud judge (else the local Ollama fallback grades).
 
 # 3. Start the local judge LLM (one-time pull, then daemon)
 ollama pull llama3.1:8b
