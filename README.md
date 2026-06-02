@@ -40,14 +40,19 @@ The pipeline embeds each transaction chunk with a contextual prefix (per the Ant
 
 ## Metrics
 
-| Metric | Target | Status | Measured at |
-|---|---|---|---|
-| Hallucination rate | <5% | **TARGET — not yet measured** | Step 6 (DeepEval harness) |
-| Faithfulness | >0.85 | **TARGET — not yet measured** | Step 6 |
-| Contextual recall @ 5 | >0.85 | **TARGET — not yet measured** | Step 6 |
-| p95 retrieval latency | <200 ms | **TARGET — not yet measured** | Step 8 (latency profiling) |
+Measured by the Step-6 DeepEval RAG-triad over a 20-question golden set, **strong judge** (OpenRouter Llama-3.3-70B):
 
-**Honesty rule:** if a metric lands below target after measurement, this table will report the actual number + a one-line note on what would close the gap. No silent fudging.
+| Metric | Target | Measured (strong judge) | Note |
+|---|---|---|---|
+| Faithfulness | >0.85 | **0.948 ✅** | weak local-8B judge scored 0.593 — see judge-dependence below |
+| Answer relevancy | >0.85 | **0.906 ✅** | weak 8B: 0.671 |
+| Contextual recall @ 5 | >0.85 | **1.000 ✅** (8 exact-fact) | aggregates excluded — a computed total isn't verbatim in any chunk; weak 8B: 0.700 |
+| Trick-question refusals | grounding guard | **4/4 ✅** | judge-independent (exact refusal-match) |
+| p95 retrieval latency | <200 ms | *not yet measured* | Step 8 |
+
+**Judge-dependence (key finding).** The numbers above come from a strong judge. A controlled A/B (`eval/compare_judges.py`) over the *identical* 20 cases with a weak local-8B judge scored the **same system** 0.593 / 0.671 / 0.700 — failing all three — because the weak judge mis-scores (e.g. 0.0 faithfulness on a correct answer). An 0.85 gate is only trustworthy with a capable judge, so CI uses a **Groq-first / local-Ollama-fallback** judge. Full detail: `notes/step-06-eval-harness.md` Finding 5.
+
+**Honesty rule:** metrics are reported as actually measured, with the judge noted. No silent fudging — the weak-judge numbers are shown right beside the strong-judge ones.
 
 ---
 
